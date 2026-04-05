@@ -405,7 +405,7 @@ def save_latest(args: str, state, config_or_none=None) -> bool:
 
     ok(f"Session saved → {latest_path}")
     ok(f"             → {daily_path}  (id: {sid})")
-    ok(f"  history.json: {len(hist['sessions'])} sessions / {hist['total_turns']} total turns")
+    ok(f"             → {SESSION_HIST_FILE}  ({len(hist['sessions'])} sessions / {hist['total_turns']} total turns)")
     return True
 def cmd_load(args: str, state, _config) -> bool:
     from config import SESSIONS_DIR, MR_SESSION_DIR, DAILY_DIR
@@ -449,18 +449,91 @@ def cmd_load(args: str, state, _config) -> bool:
                 pass
             print(clr(f"  [{i+1:2d}] ", "yellow") + label)
 
+        # Show history.json option at the bottom if it exists
+        from config import SESSION_HIST_FILE
+        has_history = SESSION_HIST_FILE.exists()
+        if has_history:
+            try:
+                hist_meta = json.loads(SESSION_HIST_FILE.read_text())
+                n_sess  = len(hist_meta.get("sessions", []))
+                n_turns = hist_meta.get("total_turns", 0)
+                print(clr(f"\n  ── Complete History ──", "dim"))
+                print(clr("  [ H] ", "yellow") +
+                      f"Load ALL history  ({n_sess} sessions / {n_turns} total turns)  {SESSION_HIST_FILE}")
+            except Exception:
+                has_history = False
+
         print()
-        ans = input(clr("  Enter number (or press Enter to cancel) > ", "cyan")).strip()
-        if not ans.isdigit():
+        ans = input(clr("  Enter number(s) (e.g. 1 or 1,2,3), H for full history, or Enter to cancel > ", "cyan")).strip().lower()
+
+        if not ans:
             info("  Cancelled.")
             return True
 
-        idx = int(ans) - 1
-        if idx < 0 or idx >= len(sessions):
-            err("Invalid selection.")
+        if ans == "h":
+            if not has_history:
+                err("history.json not found.")
+                return True
+            hist_data = json.loads(SESSION_HIST_FILE.read_text())
+            all_sessions = hist_data.get("sessions", [])
+            if not all_sessions:
+                info("history.json is empty.")
+                return True
+            all_messages = []
+            for s in all_sessions:
+                all_messages.extend(s.get("messages", []))
+            total_turns = sum(s.get("turn_count", 0) for s in all_sessions)
+            est_tokens = sum(len(str(m.get("content", ""))) for m in all_messages) // 4
+            print()
+            print(clr(f"  {len(all_messages)} messages / ~{est_tokens:,} tokens estimated", "dim"))
+            confirm = input(clr("  Load full history into current session? [y/N] > ", "yellow")).strip().lower()
+            if confirm != "y":
+                info("  Cancelled.")
+                return True
+            state.messages = all_messages
+            state.turn_count = total_turns
+            ok(f"Full history loaded from {SESSION_HIST_FILE} ({len(all_messages)} messages across {len(all_sessions)} sessions)")
             return True
 
-        path = sessions[idx]
+        # Parse comma-separated numbers (e.g. "1", "1,2,3", "1, 3")
+        raw_parts = [p.strip() for p in ans.split(",")]
+        indices = []
+        for p in raw_parts:
+            if not p.isdigit():
+                err(f"Invalid input '{p}'. Enter numbers separated by commas, or H.")
+                return True
+            idx = int(p) - 1
+            if idx < 0 or idx >= len(sessions):
+                err(f"Invalid selection: {p} (valid range: 1–{len(sessions)})")
+                return True
+            if idx not in indices:
+                indices.append(idx)
+
+        if len(indices) == 1:
+            # Single session — load directly
+            path = sessions[indices[0]]
+        else:
+            # Multiple sessions — merge in selected order
+            all_messages = []
+            total_turns  = 0
+            loaded_names = []
+            for idx in indices:
+                s_path = sessions[idx]
+                s_data = json.loads(s_path.read_text())
+                all_messages.extend(s_data.get("messages", []))
+                total_turns += s_data.get("turn_count", 0)
+                loaded_names.append(s_path.name)
+            est_tokens = sum(len(str(m.get("content", ""))) for m in all_messages) // 4
+            print()
+            print(clr(f"  {len(loaded_names)} sessions / {len(all_messages)} messages / ~{est_tokens:,} tokens estimated", "dim"))
+            confirm = input(clr("  Merge and load? [y/N] > ", "yellow")).strip().lower()
+            if confirm != "y":
+                info("  Cancelled.")
+                return True
+            state.messages = all_messages
+            state.turn_count = total_turns
+            ok(f"Loaded {len(loaded_names)} sessions ({len(all_messages)} messages): {', '.join(loaded_names)}")
+            return True
 
     if not path:
         fname = args.strip()

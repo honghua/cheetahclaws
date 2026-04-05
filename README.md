@@ -29,6 +29,7 @@ English | [中文](https://github.com/SafeRL-Lab/nano-claude-code/blob/main/docs
 
 
 ## 🔥🔥🔥 News (Pacific Time)
+- 01:00 PM, Apr 05, 2026: **v3.05.4** — Structured session history: on every exit, sessions are saved to `daily/YYYY-MM-DD/` (capped at `session_daily_limit`, default 5 per day) and appended to a master `history.json` (capped at `session_history_limit`, default 100). Each session file now includes `session_id` and `saved_at` metadata. `/load` groups sessions by date with time, ID, and turn-count display; supports multi-select (`1,2,3`) to merge sessions and `H` to load the full history with token-count confirmation. Both limits are configurable via `/config`.
 - 09:34 AM, Apr 05, 2026: **v3.05.3** — Added GitHub Gist cloud sync: `/cloudsave setup <token>` to configure, `/cloudsave` to upload the current session to a private Gist, `/cloudsave auto on` to sync automatically on `/exit`, `/cloudsave list` to browse cloud sessions, and `/cloudsave load <id>` to restore from the cloud. Uses stdlib `urllib` — no new dependencies. Also added version number (e.g., `v3.05.2`) in the startup banner: The startup banner now displays the current version number (v3.05.2) in green, making it easy to identify which version is running at a glance.
 - 08:58 AM, Apr 05, 2026: **v3.05.2** — Introduced `/proactive [duration]` command: a background daemon thread watches for user inactivity and automatically wakes the agent up after the specified interval (e.g. `/proactive 5m`), enabling continuous monitoring loops without user intervention. `/proactive` with no args now shows current status; `/proactive off` disables it explicitly. Proactive polling state is stored in `config` (no module-level globals). Watcher exceptions are logged via `traceback` instead of silently swallowed. Also fixed duplicated output in Rich-enabled terminals by buffering text during streaming and rendering Markdown once via `rich.live.Live` — updates happen in-place for a true streaming Markdown experience. 
 - 10:51 PM, Apr 04, 2026: **v3.05_fix04** — Fixed a crash on `/model` and config save commands caused by the newly introduced `_run_query_callback` being serialized to JSON; also added `SleepTimer` usage    
@@ -184,7 +185,7 @@ Claude Code is a powerful, production-grade AI coding assistant — but its sour
 | Proactive monitoring | `/proactive [duration]` starts a background sentinel daemon; agent wakes automatically after inactivity, enabling continuous monitoring loops without user prompts |
 | Rich Live streaming | When `rich` is installed, responses render as live-updating Markdown in place — no duplicate raw text, clean tool-call interleaving |
 | Context injection | Auto-loads `CLAUDE.md`, git status, cwd, persistent memory |
-| Session persistence | Save / load conversations to `~/.nano_claude/sessions/`; **autosave on exit** + `/resume` to instantly restore last session |
+| Session persistence | Autosave on exit to `daily/YYYY-MM-DD/` (per-day limit) + `history.json` (master, all sessions) + `session_latest.json` (/resume); sessions include `session_id` and `saved_at` metadata; `/load` grouped by date |
 | Cloud sync | `/cloudsave` syncs sessions to private GitHub Gists; auto-sync on exit; load from cloud by Gist ID. No new dependencies (stdlib `urllib`). |
 | Extended Thinking | Toggle on/off (Claude models only) |
 | Cost tracking | Token usage + estimated USD cost |
@@ -578,8 +579,8 @@ Type `/` and press **Tab** to autocomplete.
 | `/config key=value` | Set a config value (persisted to disk) |
 | `/save` | Save session (auto-named by timestamp) |
 | `/save <filename>` | Save session to named file |
-| `/load` | List all saved sessions |
-| `/load <filename>` | Load a saved session |
+| `/load` | Interactive list grouped by date; enter number, `1,2,3` to merge, or `H` for full history |
+| `/load <filename>` | Load a saved session by filename |
 | `/resume` | Restore the last auto-saved session (`mr_sessions/session_latest.json`) |
 | `/resume <filename>` | Load a specific file from `mr_sessions/` (or absolute path) |
 | `/history` | Print full conversation history |
@@ -1386,29 +1387,47 @@ Place a `CLAUDE.md` file in your project to give the model persistent context ab
 
 ## Session Management
 
-### Manual save / load
+### Storage layout
 
-```bash
-# Inside REPL:
-/save                          # auto-name: session_20260401_143022.json
-/save debug_auth_bug           # named save
-
-/load                          # list all saved sessions
-/load debug_auth_bug           # resume a session
-/load session_20260401_143022.json
-```
-
-Sessions are stored as JSON in `~/.nano_claude/sessions/`.
-
-### Autosave + resume (v3.05_fix)
-
-Every time you exit — via `/exit`, `/quit`, `Ctrl+C`, or `Ctrl+D` — the current session is automatically saved to:
+Every exit automatically saves to three places:
 
 ```
-~/.nano_claude/sessions/mr_sessions/session_latest.json
+~/.nano_claude/sessions/
+├── history.json                          ← master: all sessions ever (capped)
+├── mr_sessions/
+│   └── session_latest.json              ← always the most recent (/resume)
+└── daily/
+    ├── 2026-04-05/
+    │   ├── session_110523_a3f9.json     ← per-day files, newest kept
+    │   └── session_143022_b7c1.json
+    └── 2026-04-04/
+        └── session_183100_3b4c.json
 ```
 
-To continue where you left off, simply run `/resume` at the start of the next session:
+Each session file includes metadata:
+
+```json
+{
+  "session_id": "a3f9c1b2",
+  "saved_at": "2026-04-05 11:05:23",
+  "turn_count": 8,
+  "messages": [...]
+}
+```
+
+### Autosave on exit
+
+Every time you exit — via `/exit`, `/quit`, `Ctrl+C`, or `Ctrl+D` — the session is saved automatically:
+
+```
+✓ Session saved → /home/.../.nano_claude/sessions/mr_sessions/session_latest.json
+✓              → /home/.../.nano_claude/sessions/daily/2026-04-05/session_110523_a3f9.json  (id: a3f9c1b2)
+✓   history.json: 12 sessions / 87 total turns
+```
+
+### Quick resume
+
+To continue where you left off:
 
 ```bash
 python nano_claude.py
@@ -1416,11 +1435,67 @@ python nano_claude.py
 ✓  Session loaded from …/mr_sessions/session_latest.json (42 messages)
 ```
 
-You can also resume a specific file:
+Resume a specific file:
 
 ```bash
 /resume session_latest.json          # loads from mr_sessions/
 /resume /absolute/path/to/file.json  # loads from absolute path
+```
+
+### Manual save / load
+
+```bash
+/save                          # save with auto-name (session_TIMESTAMP_ID.json)
+/save debug_auth_bug           # named save to ~/.nano_claude/sessions/
+
+/load                          # interactive list grouped by date
+/load debug_auth_bug           # load by filename
+```
+
+**`/load` interactive list:**
+
+```
+  ── 2026-04-05 ──
+  [ 1] 11:05:23  id:a3f9c1b2  turns:8   session_110523_a3f9.json
+  [ 2] 09:22:01  id:7e2d4f91  turns:3   session_092201_7e2d.json
+
+  ── 2026-04-04 ──
+  [ 3] 22:18:00  id:3b4c5d6e  turns:15  session_221800_3b4c.json
+
+  ── Complete History ──
+  [ H] Load ALL history  (3 sessions / 26 total turns)  /home/.../.nano_claude/sessions/history.json
+
+  Enter number(s) (e.g. 1 or 1,2,3), H for full history, or Enter to cancel >
+```
+
+- Enter a single number to load one session
+- Enter comma-separated numbers (e.g. `1,3`) to merge multiple sessions in order
+- Enter `H` to load the entire history — shows message count and token estimate before confirming
+
+### Configurable limits
+
+| Config key | Default | Description |
+|---|---|---|
+| `session_daily_limit` | `5` | Max session files kept per day in `daily/` |
+| `session_history_limit` | `100` | Max sessions kept in `history.json` |
+
+```bash
+/config session_daily_limit=10
+/config session_history_limit=200
+```
+
+### history.json — full conversation history
+
+`history.json` accumulates every session in one place, making it possible to search your complete conversation history or analyze usage patterns:
+
+```json
+{
+  "total_turns": 150,
+  "sessions": [
+    {"session_id": "a3f9c1b2", "saved_at": "2026-04-05 11:05:23", "turn_count": 8, "messages": [...]},
+    {"session_id": "7e2d4f91", "saved_at": "2026-04-05 09:22:01", "turn_count": 3, "messages": [...]}
+  ]
+}
 ```
 
 ---
@@ -1500,7 +1575,7 @@ nano_claude_code/
 ├── tool_registry.py      # Tool plugin registry: register, lookup, execute
 ├── compaction.py         # Context compression: snip + auto-summarize
 ├── context.py            # System prompt builder: CLAUDE.md + git + memory
-├── config.py             # Config load/save/defaults
+├── config.py             # Config load/save/defaults; DAILY_DIR, SESSION_HIST_FILE paths
 ├── cloudsave.py          # GitHub Gist cloud sync (upload/download/list sessions)
 │
 ├── multi_agent/          # Multi-agent package
