@@ -288,49 +288,72 @@ def cmd_help(_args: str, _state, _config) -> bool:
     print(__doc__)
     return True
 
+def cmd_model(args: str, _state, config) -> bool:
+    from providers import detect_provider, PROVIDERS
+    m = args.strip().replace(":", "/", 1)
+    if not m:
+        pname = detect_provider(config["model"])
+        curr  = clr(config["model"], "green", "bold")
+        print(f"Current model: {curr} (provider: {pname})")
+        print(clr("\nPredefined models (use /model <name>):", "dim"))
+        for p, d in PROVIDERS.items():
+            mods = ", ".join(d.get("models", []))
+            if mods:
+                print(f"  {clr(p+':', 'yellow'):12s} {mods}")
+        return True
+
+    pname = detect_provider(m)
+    if pname == "ollama":
+        if "/" in m:
+            prov, mod = m.split("/", 1)
+            if ":" not in mod:
+                m = f"{prov}/{mod}:latest"
+        elif ":" not in m:
+            m = f"{m}:latest"
+            
+    config["model"] = m
+    from config import save_config
+    save_config(config)
+    ok(f"Model set to {clr(m, 'bold')}  (provider: {pname})")
+    return True
+
+def _interactive_ollama_picker(config: dict) -> bool:
+    """Prompt the user to select from locally available Ollama models."""
+    from providers import PROVIDERS, list_ollama_models
+    prov = PROVIDERS.get("ollama", {})
+    base_url = prov.get("base_url", "http://localhost:11434")
+    
+    models = list_ollama_models(base_url)
+    if not models:
+        err(f"No local Ollama models found at {base_url}.")
+        return False
+        
+    print(clr("\n  ── Local Ollama Models ──", "dim"))
+    for i, m in enumerate(models):
+        print(clr(f"  [{i+1:2d}] ", "yellow") + m)
+    print()
+    
+    try:
+        ans = input(clr("  Select a model number or Enter to cancel > ", "cyan")).strip()
+        if not ans: return False
+        idx = int(ans) - 1
+        if 0 <= idx < len(models):
+            new_model = f"ollama/{models[idx]}"
+            config["model"] = new_model
+            from config import save_config
+            save_config(config)
+            ok(f"Model updated to {new_model}")
+            return True
+        else:
+            err("Invalid selection.")
+    except (ValueError, KeyboardInterrupt, EOFError):
+        pass
+    return False
+
 def cmd_clear(_args: str, state, _config) -> bool:
     state.messages.clear()
     state.turn_count = 0
     ok("Conversation cleared.")
-    return True
-
-def cmd_model(args: str, _state, config) -> bool:
-    from providers import PROVIDERS, detect_provider
-    if not args:
-        model = config["model"]
-        pname = detect_provider(model)
-        info(f"Current model:    {model}  (provider: {pname})")
-        info("\nAvailable models by provider:")
-        for pn, pdata in PROVIDERS.items():
-            ms = pdata.get("models", [])
-            if ms:
-                info(f"  {pn:12s}  " + ", ".join(ms[:4]) + ("..." if len(ms) > 4 else ""))
-        info("\nFormat: 'provider/model' or just model name (auto-detected)")
-        info("  e.g. /model gpt-4o")
-        info("  e.g. /model ollama/qwen2.5-coder")
-        info("  e.g. /model kimi:moonshot-v1-32k")
-    else:
-        # Accept both "ollama/model" and "ollama:model" syntax
-        # Only treat ':' as provider separator if left side is a known provider
-        m = args.strip()
-        if "/" not in m and ":" in m:
-            left, right = m.split(":", 1)
-            if left in PROVIDERS:
-                m = f"{left}/{right}"
-        pname = detect_provider(m)
-        # Ollama auto-tagging: append :latest if missing a colon
-        if pname == "ollama":
-            if "/" in m:
-                prov, mod = m.split("/", 1)
-                if ":" not in mod:
-                    m = f"{prov}/{mod}:latest"
-            elif ":" not in m:
-                m = f"{m}:latest"
-
-        config["model"] = m
-        ok(f"Model set to {m}  (provider: {pname})")
-        from config import save_config
-        save_config(config)
     return True
 
 def cmd_config(args: str, _state, config) -> bool:
@@ -1598,7 +1621,7 @@ def repl(config: dict, initial_prompt: str = None):
         print(clr("╰" + "─" * (_box_w - 2) + "╯", "dim"))
         print()
 
-    query_lock = threading.Lock()
+    query_lock = threading.RLock()
     
     # Initialize proactive polling state in config (avoids module-level globals)
     config.setdefault("_proactive_enabled", False)
@@ -1627,44 +1650,59 @@ def repl(config: dict, initial_prompt: str = None):
 
             thinking_started = False
 
-            for event in run(user_input, state, config, system_prompt):
-                if isinstance(event, TextChunk):
-                    if thinking_started:
-                        print("\033[0m\n")  # Reset dim ANSI + break line after thinking block
-                        thinking_started = False
-                    # stream_text auto-starts Live on first chunk when Rich available
-                    stream_text(event.text)
+            try:
+                for event in run(user_input, state, config, system_prompt):
+                    if isinstance(event, TextChunk):
+                        if thinking_started:
+                            print("\033[0m\n")  # Reset dim ANSI + break line after thinking block
+                            thinking_started = False
+                        # stream_text auto-starts Live on first chunk when Rich available
+                        stream_text(event.text)
 
-                elif isinstance(event, ThinkingChunk):
-                    if verbose:
-                        if not thinking_started:
-                            flush_response()  # stop Live before printing static thinking
-                            print(clr("\n  [thinking]", "dim"))
-                            thinking_started = True
-                        stream_thinking(event.text, verbose)
+                    elif isinstance(event, ThinkingChunk):
+                        if verbose:
+                            if not thinking_started:
+                                flush_response()  # stop Live before printing static thinking
+                                print(clr("\n  [thinking]", "dim"))
+                                thinking_started = True
+                            stream_thinking(event.text, verbose)
 
-                elif isinstance(event, ToolStart):
-                    flush_response()  # stop Live, commit text so far
-                    print_tool_start(event.name, event.inputs, verbose)
+                    elif isinstance(event, ToolStart):
+                        flush_response()  # stop Live, commit text so far
+                        print_tool_start(event.name, event.inputs, verbose)
 
-                elif isinstance(event, PermissionRequest):
-                    flush_response()  # stop Live before interactive prompt
-                    event.granted = ask_permission_interactive(event.description, config)
-                    # Live will restart automatically on next TextChunk
+                    elif isinstance(event, PermissionRequest):
+                        flush_response()  # stop Live before interactive prompt
+                        event.granted = ask_permission_interactive(event.description, config)
+                        # Live will restart automatically on next TextChunk
 
-                elif isinstance(event, ToolEnd):
-                    print_tool_end(event.name, event.result, verbose)
-                    if not _RICH:
-                        print(clr("│ ", "dim"), end="", flush=True)
-                    # Live will restart automatically on next TextChunk
+                    elif isinstance(event, ToolEnd):
+                        print_tool_end(event.name, event.result, verbose)
+                        if not _RICH:
+                            print(clr("│ ", "dim"), end="", flush=True)
+                        # Live will restart automatically on next TextChunk
 
-                elif isinstance(event, TurnDone):
-                    if verbose:
-                        flush_response()  # stop Live before printing token info
-                        print(clr(
-                            f"\n  [tokens: +{event.input_tokens} in / "
-                            f"+{event.output_tokens} out]", "dim"
-                        ))
+                    elif isinstance(event, TurnDone):
+                        if verbose:
+                            flush_response()  # stop Live before printing token info
+                            print(clr(
+                                f"\n  [tokens: +{event.input_tokens} in / "
+                                f"+{event.output_tokens} out]", "dim"
+                            ))
+            except Exception as e:
+                import urllib.error
+                # Catch 404 Not Found (Ollama model missing)
+                if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+                    from providers import detect_provider
+                    if detect_provider(config["model"]) == "ollama":
+                        flush_response()
+                        err(f"Ollama model '{config['model']}' not found.")
+                        if _interactive_ollama_picker(config):
+                            # Remove the user message added by run() before retrying
+                            if state.messages and state.messages[-1]["role"] == "user":
+                                state.messages.pop()
+                            return run_query(user_input, is_background)
+                raise e
 
             flush_response()  # stop Live, commit any remaining text
             print(clr("╰──────────────────────────────────────────────", "dim"))
