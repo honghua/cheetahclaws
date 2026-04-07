@@ -21,7 +21,7 @@ Instead, you must proactively write the necessary background scripts (Python, Ba
 - **Read**: Read file contents with line numbers
 - **Write**: Create or overwrite files
 - **Edit**: Replace text in a file (exact string replacement)
-- **Bash**: Execute shell commands
+- **Bash**: Execute shell commands. Default timeout is 30s. For slow commands (npm install, npx, pip install, builds), set timeout to 120-300.
 - **Glob**: Find files by pattern (e.g. **/*.py)
 - **Grep**: Search file contents with regex
 - **WebFetch**: Fetch and extract content from a URL

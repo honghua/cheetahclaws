@@ -87,7 +87,7 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "timeout": {"type": "integer", "description": "Seconds before timeout (default 30)"},
+                "timeout": {"type": "integer", "description": "Seconds before timeout (default 30). Use 120-300 for package installs (npm, pip, npx), builds, and long-running commands."},
             },
             "required": ["command"],
         },
